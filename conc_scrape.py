@@ -66,6 +66,7 @@ def scrape_emails(args, redis_client):
 
     with ThreadPoolExecutor(args.threads) as executor:
         while to_visit and depth < args.depth:
+            remaining_depth = args.depth - depth
             futures = {executor.submit(scrape_page, url): url for url in to_visit}
             to_visit = set()
 
@@ -87,7 +88,7 @@ def scrape_emails(args, redis_client):
                         if is_same_hostname(args.url, link, args.hostnameLvl) and not redis_client.hexists(visited_key, hash_url(link))
                     )
 
-                    redis_client.hset(visited_key, hashed_url, 1)
+                    redis_client.hset(visited_key, hashed_url, remaining_depth)
                     print(f"Total email(s) {redis_client.hlen(emails_key)}. Done processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
