@@ -1,28 +1,17 @@
 import sys
 import re
 import hashlib
+import redis.client
 import requests
 import argparse
 import redis
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 
-def get_base_domain(url, level):
-    parsed_url = urlparse(url)
-    hostname = parsed_url.hostname
-    if not hostname:
-        return None
-    parts = hostname.split('.')
-    return '.'.join(parts[-level:]) if len(parts) >= level else hostname
-
-def is_same_hostname(url1, url2, level):
-    if level == 0:
-        return True
-
-    domain1 = get_base_domain(url1, level)
-    domain2 = get_base_domain(url2, level)
-    return domain1 == domain2
+visited_key = "visited_urls"
+emails_key = "scraped_emails"
+to_visit_key = "to_visit_urls"
 
 def get_emails_from_text(text):
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -57,43 +46,37 @@ def is_valid_url(url):
 def hash_url(url):
     return hashlib.sha256(url.encode('utf-8')).hexdigest()
 
+def is_valid_domain(url, domain):
+    parsed = urlparse(url)
+    return parsed.hostname.endswith(domain)
+
 def scrape_emails(args, redis_client):
-    visited_key = "visited_urls"
-    emails_key = "scraped_emails"
-
-    to_visit = {args.url}
-    depth = 0
-
     with ThreadPoolExecutor(args.threads) as executor:
-        while to_visit and depth < args.depth:
-            remaining_depth = args.depth - depth
+        while True:
+            to_visit = redis_client.blmpop(0, 1, to_visit_key, direction='LEFT', count=args.threads)[1]
+            print(to_visit)
             futures = {executor.submit(scrape_page, url): url for url in to_visit}
-            to_visit = set()
 
-            for future in futures:
+            for future in as_completed(futures):
                 url = futures[future]
                 hashed_url = hash_url(url)
 
                 try:
-                    if redis_client.hexists(visited_key, hashed_url):
-                        continue
-
                     page_emails, links = future.result()
+                    links = [link for link in links if is_valid_domain(link, args.domain)]
+                    ismembers = redis_client.smismember(visited_key, map(hash_url, links)) if len(links) > 0 else []
+                    unvisited_links = [link for link, ismember in zip(links, ismembers) if not ismember]
 
-                    for email in page_emails:
-                        redis_client.hset(emails_key, email, 1)
+                    if len(page_emails) > 0:
+                        redis_client.sadd(emails_key, *page_emails)
+                    if len(unvisited_links) > 0:
+                        redis_client.rpush(to_visit_key, *unvisited_links)
+                    redis_client.sadd(visited_key, hashed_url)
 
-                    to_visit.update(
-                        link for link in links
-                        if is_same_hostname(args.url, link, args.hostnameLvl) and not redis_client.hexists(visited_key, hash_url(link))
-                    )
-
-                    redis_client.hset(visited_key, hashed_url, remaining_depth)
-                    print(f"Total email(s) {redis_client.hlen(emails_key)}. Done processing {url}")
+                    print(f"Added {len(page_emails)} email(s) and {len(unvisited_links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
-
-            depth += 1
+                    redis_client.rpush(to_visit_key, url)
 
 def main(args):
     if not is_valid_url(args.url):
@@ -101,17 +84,15 @@ def main(args):
         sys.exit(1)
 
     redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
-    previous_emails = redis_client.hlen('scraped_emails')
-
     print(f"Starting email scraping from: {args.url}")
-    scrape_emails(args, redis_client)
 
-    new_emails = redis_client.hlen('scraped_emails') - previous_emails
-    print(f"Email scraping completed. New unique emails: {new_emails}")
+    redis_client.rpush(to_visit_key, args.url)
+    scrape_emails(args, redis_client)
+    print(f"Email scraping completed for: {args.url}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Scrape email addresses from a given website"
+        description="Scrape email addresses with a starting url"
     )
 
     parser.add_argument(
@@ -121,24 +102,17 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--hostnameLvl",
-        type=int,
-        default=0,
-        help="Scrape only links from hostnames with matching specified levels of hostname (default: 0)."
-    )
-
-    parser.add_argument(
-        "--depth",
-        type=int,
-        default=5,
-        help="Maximum depth to search (default: 5)."
-    )
-
-    parser.add_argument(
         "--threads",
         type=int,
         default=8,
         help="Number of concurrent threads (default: 8)."
+    )
+
+    parser.add_argument(
+        "--domain",
+        type=str,
+        default="",
+        help="Only scrape URLs whose hostname ends with the specified domain."
     )
 
     args = parser.parse_args()
