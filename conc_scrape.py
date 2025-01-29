@@ -1,6 +1,7 @@
 import sys
 import re
 import hashlib
+import time
 import redis.client
 import requests
 import argparse
@@ -53,7 +54,12 @@ def is_valid_domain(url, domain):
 def scrape_emails(args, redis_client):
     with ThreadPoolExecutor(args.threads) as executor:
         while True:
-            to_visit = redis_client.blmpop(0, 1, to_visit_key, direction='LEFT', count=args.threads)[1]
+            to_visit = redis_client.spop(to_visit_key, args.threads)
+            if not to_visit:
+                print("No more URLs to visit. Checking again in 500ms.")
+                time.sleep(0.5)
+                continue
+
             print(to_visit)
             futures = {executor.submit(scrape_page, url): url for url in to_visit}
 
@@ -70,23 +76,24 @@ def scrape_emails(args, redis_client):
                     if len(page_emails) > 0:
                         redis_client.sadd(emails_key, *page_emails)
                     if len(unvisited_links) > 0:
-                        redis_client.rpush(to_visit_key, *unvisited_links)
+                        redis_client.sadd(to_visit_key, *unvisited_links)
                     redis_client.sadd(visited_key, hashed_url)
 
                     print(f"Added {len(page_emails)} email(s) and {len(unvisited_links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
-                    redis_client.rpush(to_visit_key, url)
 
 def main(args):
-    if not is_valid_url(args.url):
-        print("Invalid URL. Please provide a valid URL.")
-        sys.exit(1)
-
     redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
-    print(f"Starting email scraping from: {args.url}")
 
-    redis_client.rpush(to_visit_key, args.url)
+    if args.url:
+        if is_valid_url(args.url):
+            redis_client.sadd(to_visit_key, args.url)
+        else:
+            print("Invalid URL. Please provide a valid URL.")
+            sys.exit(1)
+
+    print(f"Starting email scraping from: {args.url}")
     scrape_emails(args, redis_client)
     print(f"Email scraping completed for: {args.url}")
 
@@ -96,9 +103,10 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "url",
+        "--url",
         type=str,
-        help="Starting URL"
+        default="",
+        help="Starting URL (default: None)"
     )
 
     parser.add_argument(
