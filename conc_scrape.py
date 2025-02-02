@@ -95,7 +95,8 @@ def scrape_emails(args, redis_client):
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
 
-            redis_client.zadd(to_visit_key, zadd_mapping)
+            if zadd_mapping:
+                redis_client.zadd(to_visit_key, zadd_mapping)
 
 def main(args):
     redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
