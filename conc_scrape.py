@@ -9,6 +9,7 @@ import redis
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
+from multiprocessing import Process
 
 visited_key = "visited_urls"
 emails_key = "scraped_emails"
@@ -109,7 +110,16 @@ def main(args):
             sys.exit(1)
 
     print(f"Starting email scraping from: {args.url}")
-    scrape_emails(args, redis_client)
+
+    processes = []
+    for _ in range(args.processes):
+        p = Process(target=scrape_emails, args=(args, redis_client))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
     print(f"Email scraping completed for: {args.url}")
 
 if __name__ == "__main__":
@@ -143,6 +153,13 @@ if __name__ == "__main__":
         type=int,
         default=10,
         help="Maximum depth to search (default: 10)."
+    )
+
+    parser.add_argument(
+        "--processes",
+        type=int,
+        default=1,
+        help="Number of concurrent processes (default: 1)."
     )
 
     args = parser.parse_args()
