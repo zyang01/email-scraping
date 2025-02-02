@@ -59,20 +59,14 @@ def get_domain(url):
 def scrape_emails(args, redis_client):
     with ThreadPoolExecutor(args.threads) as executor:
         while True:
-            to_visit = []
-            for _ in range(args.threads):
-                item = redis_client.lpop(to_visit_key)
-                if item:
-                    to_visit.append(item)
-                else:
-                    break
+            to_visit = redis_client.zpopmin(to_visit_key, args.threads)
 
             if not to_visit:
                 print("No more URLs to visit. Checking again in 30s.")
                 time.sleep(30)
                 continue
 
-            futures = {executor.submit(scrape_page, url.split(',', 1)[1]): url for url in to_visit}
+            futures = {executor.submit(scrape_page, url.split(',', 1)[1]): url for url, _ in to_visit}
 
             for future in as_completed(futures):
                 url = futures[future]
@@ -92,9 +86,8 @@ def scrape_emails(args, redis_client):
                         for link in unvisited_links:
                             domain = get_domain(link)
                             domain_count = redis_client.hget(domain_count_key, domain) or 0
-                            if int(domain_count) < args.limit:
-                                redis_client.rpush(to_visit_key, f"{depth + 1},{link}")
-                                redis_client.hincrby(domain_count_key, domain, 1)
+                            redis_client.zadd(to_visit_key, {f"{depth + 1},{link}": int(domain_count)})
+                            redis_client.hincrby(domain_count_key, domain, 1)
                     redis_client.sadd(visited_key, hashed_url)
 
                     print(f"Depth {depth} added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
@@ -106,8 +99,8 @@ def main(args):
 
     if args.url:
         if is_valid_url(args.url):
-            redis_client.rpush(to_visit_key, f"0,{args.url}")
             domain = get_domain(args.url)
+            redis_client.zadd(to_visit_key, {f"0,{args.url}": 0})
             redis_client.hincrby(domain_count_key, domain, 1)
         else:
             print("Invalid URL. Please provide a valid URL.")
@@ -148,13 +141,6 @@ if __name__ == "__main__":
         type=int,
         default=10,
         help="Maximum depth to search (default: 10)."
-    )
-
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=128,
-        help="Maximum number of URLs to visit per domain (default: 128)."
     )
 
     args = parser.parse_args()
