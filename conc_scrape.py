@@ -25,7 +25,7 @@ def scrape_page(url):
             headers={
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.47 Safari/537.36'
             },
-            timeout=5
+            timeout=3
         )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -88,7 +88,7 @@ def scrape_emails(args, redis_client):
                             redis_client.rpush(to_visit_key, f"{depth + 1},{link}")
                     redis_client.sadd(visited_key, hashed_url)
 
-                    print(f"Depth {depth} added {len(page_emails)} email(s) and {len(unvisited_links)} URL(s) processing {url}")
+                    print(f"Depth {depth} added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
 
