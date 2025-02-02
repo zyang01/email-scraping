@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlparse
 visited_key = "visited_urls"
 emails_key = "scraped_emails"
 to_visit_key = "to_visit_urls"
+domain_count_key = "domain_count"
 
 def get_emails_from_text(text):
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -51,6 +52,10 @@ def is_valid_domain(url, domain):
     parsed = urlparse(url)
     return parsed.hostname.endswith(domain)
 
+def get_domain(url):
+    parsed = urlparse(url)
+    return parsed.hostname
+
 def scrape_emails(args, redis_client):
     with ThreadPoolExecutor(args.threads) as executor:
         while True:
@@ -85,7 +90,11 @@ def scrape_emails(args, redis_client):
                         redis_client.sadd(emails_key, *page_emails)
                     if len(unvisited_links) > 0 and depth < args.depth:
                         for link in unvisited_links:
-                            redis_client.rpush(to_visit_key, f"{depth + 1},{link}")
+                            domain = get_domain(link)
+                            domain_count = redis_client.hget(domain_count_key, domain) or 0
+                            if int(domain_count) < args.limit:
+                                redis_client.rpush(to_visit_key, f"{depth + 1},{link}")
+                                redis_client.hincrby(domain_count_key, domain, 1)
                     redis_client.sadd(visited_key, hashed_url)
 
                     print(f"Depth {depth} added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
@@ -98,6 +107,8 @@ def main(args):
     if args.url:
         if is_valid_url(args.url):
             redis_client.rpush(to_visit_key, f"0,{args.url}")
+            domain = get_domain(args.url)
+            redis_client.hincrby(domain_count_key, domain, 1)
         else:
             print("Invalid URL. Please provide a valid URL.")
             sys.exit(1)
@@ -137,6 +148,13 @@ if __name__ == "__main__":
         type=int,
         default=10,
         help="Maximum depth to search (default: 10)."
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=128,
+        help="Maximum number of URLs to visit per domain (default: 128)."
     )
 
     args = parser.parse_args()
