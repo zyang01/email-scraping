@@ -54,17 +54,25 @@ def is_valid_domain(url, domain):
 def scrape_emails(args, redis_client):
     with ThreadPoolExecutor(args.threads) as executor:
         while True:
-            to_visit = redis_client.spop(to_visit_key, args.threads)
+            to_visit = []
+            for _ in range(args.threads):
+                item = redis_client.lpop(to_visit_key)
+                if item:
+                    to_visit.append(item)
+                else:
+                    break
+
             if not to_visit:
-                print("No more URLs to visit. Checking again in 500ms.")
-                time.sleep(0.5)
+                print("No more URLs to visit. Checking again in 30s.")
+                time.sleep(30)
                 continue
 
-            print(to_visit)
-            futures = {executor.submit(scrape_page, url): url for url in to_visit}
+            futures = {executor.submit(scrape_page, url.split(',', 1)[1]): url for url in to_visit}
 
             for future in as_completed(futures):
                 url = futures[future]
+                depth, url = url.split(',', 1)
+                depth = int(depth)
                 hashed_url = hash_url(url)
 
                 try:
@@ -75,11 +83,12 @@ def scrape_emails(args, redis_client):
 
                     if len(page_emails) > 0:
                         redis_client.sadd(emails_key, *page_emails)
-                    if len(unvisited_links) > 0:
-                        redis_client.sadd(to_visit_key, *unvisited_links)
+                    if len(unvisited_links) > 0 and depth < args.depth:
+                        for link in unvisited_links:
+                            redis_client.rpush(to_visit_key, f"{depth + 1},{link}")
                     redis_client.sadd(visited_key, hashed_url)
 
-                    print(f"Added {len(page_emails)} email(s) and {len(unvisited_links)} URL(s) processing {url}")
+                    print(f"Depth {depth} added {len(page_emails)} email(s) and {len(unvisited_links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
 
@@ -88,7 +97,7 @@ def main(args):
 
     if args.url:
         if is_valid_url(args.url):
-            redis_client.sadd(to_visit_key, args.url)
+            redis_client.rpush(to_visit_key, f"0,{args.url}")
         else:
             print("Invalid URL. Please provide a valid URL.")
             sys.exit(1)
@@ -121,6 +130,13 @@ if __name__ == "__main__":
         type=str,
         default="",
         help="Only scrape URLs whose hostname ends with the specified domain."
+    )
+
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=10,
+        help="Maximum depth to search (default: 10)."
     )
 
     args = parser.parse_args()
