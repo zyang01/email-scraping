@@ -67,6 +67,7 @@ def scrape_emails(args, redis_client):
                 continue
 
             futures = {executor.submit(scrape_page, url.split(',', 1)[1]): url for url, _ in to_visit}
+            zadd_mapping = {}
 
             for future in as_completed(futures):
                 url = futures[future]
@@ -85,14 +86,15 @@ def scrape_emails(args, redis_client):
                     if len(unvisited_links) > 0 and depth < args.depth:
                         for link in unvisited_links:
                             domain = get_domain(link)
-                            domain_count = redis_client.hget(domain_count_key, domain) or 0
-                            redis_client.zadd(to_visit_key, {f"{depth + 1},{link}": int(domain_count)})
-                            redis_client.hincrby(domain_count_key, domain, 1)
+                            domain_count = redis_client.hincrby(domain_count_key, domain, 1)
+                            zadd_mapping[f"{depth + 1},{link}"] = int(domain_count)
                     redis_client.sadd(visited_key, hashed_url)
 
                     print(f"Depth {depth} added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
+
+            redis_client.zadd(to_visit_key, zadd_mapping)
 
 def main(args):
     redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
