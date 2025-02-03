@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 from multiprocessing import Process
+import os
 
 visited_key = "visited_urls"
 emails_key = "scraped_emails"
@@ -107,7 +108,8 @@ def scrape_emails(args, redis_client):
             print(f"Added {email_count} email(s) and {len(zadd_mapping)} URL(s)")
 
 def main(args):
-    redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+    redis_client = redis.StrictRedis.from_url(redis_url, decode_responses=True)
 
     if args.url:
         if is_valid_url(args.url):
