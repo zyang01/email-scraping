@@ -95,7 +95,7 @@ def scrape_emails(args, redis_client):
                     print(f"Error processing {url}: {e}")
 
             if zadd_mapping:
-                redis_client.zadd(to_visit_key, zadd_mapping)
+                redis_client.zadd(to_visit_key, zadd_mapping, nx=True)
             print(f"Added {email_count} email(s) and {len(zadd_mapping)} URL(s)")
 
 def main(args):
