@@ -12,12 +12,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 from multiprocessing import Process
 import os
+import socket
 
 visited_key = "visited_urls"
 emails_key = "scraped_emails"
 to_visit_key = "to_visit_urls"
 domain_count_key = "domain_count"
 shutdown_key = "shutdown"
+register_key = "register"
 
 def get_emails_from_text(text):
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -60,13 +62,14 @@ def get_domain(url):
     parsed = urlparse(url)
     return parsed.hostname
 
-def scrape_emails(args, redis_client):
+def scrape_emails(args, redis_client, hostname):
     end_time = time.time() + 3600  # Run for one hour
 
     with ThreadPoolExecutor(args.threads) as executor:
         while time.time() < end_time:
-            if redis_client.get(shutdown_key) == "yes":
-                print("Shutdown signal received. Exiting...")
+            if redis_client.get(shutdown_key) == "yes" or \
+                redis_client.hget(register_key, hostname) == "shutdown":
+                print("Shutdown signal received. Exiting child process...")
                 break
 
             to_visit = redis_client.zpopmin(to_visit_key, args.threads)
@@ -110,6 +113,8 @@ def scrape_emails(args, redis_client):
 def main(args):
     redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
     redis_client = redis.StrictRedis.from_url(redis_url, decode_responses=True)
+    hostname = socket.gethostname()
+    redis_client.hset(register_key, hostname, "online")
 
     if args.url:
         if is_valid_url(args.url):
@@ -124,22 +129,31 @@ def main(args):
 
     processes = []
     for _ in range(args.processes):
-        p = Process(target=scrape_emails, args=(args, redis_client))
+        p = Process(target=scrape_emails, args=(args, redis_client, hostname))
         p.start()
         processes.append(p)
 
     while processes:
+        if redis_client.get(shutdown_key) == "yes" or \
+            redis_client.hget(register_key, hostname) == "shutdown":
+            print("Shutdown signal received. Exiting main loop...")
+            break
+
         for p in processes[:]:
             p.join(timeout=0)
             if not p.is_alive():
                 processes.remove(p)
                 if redis_client.get(shutdown_key) != "yes":
-                    new_p = Process(target=scrape_emails, args=(args, redis_client))
+                    new_p = Process(target=scrape_emails, args=(args, redis_client, hostname))
                     new_p.start()
                     processes.append(new_p)
 
         time.sleep(1)
 
+    for p in processes:
+        p.join()
+
+    redis_client.hset(register_key, hostname, "offline")
     print("All child processes have terminated. Exiting main process.")
 
 if __name__ == "__main__":
