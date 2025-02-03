@@ -64,17 +64,18 @@ def scrape_emails(args, redis_client):
             to_visit = redis_client.zpopmin(to_visit_key, args.threads)
 
             if not to_visit:
-                print("No more URLs to visit. Checking again in 30s.")
-                time.sleep(30)
+                print("No more URLs to visit. Checking again in 10s.")
+                time.sleep(10)
                 continue
 
-            futures = {executor.submit(scrape_page, url): url for url, _ in to_visit}
+            futures = {executor.submit(scrape_page, url): (url, score) for url, score in to_visit}
             zadd_mapping = {}
             email_count = 0
 
             for future in as_completed(futures):
-                url = futures[future]
+                url, score = futures[future]
                 hashed_url = hash_url(url)
+                penalty = math.sqrt(score)
 
                 try:
                     page_emails, links = future.result()
@@ -88,7 +89,7 @@ def scrape_emails(args, redis_client):
                         for link in unvisited_links:
                             domain = get_domain(link)
                             domain_count = redis_client.hincrby(domain_count_key, domain, 1)
-                            zadd_mapping[link] = math.sqrt(int(domain_count))
+                            zadd_mapping[link] = math.sqrt(int(domain_count)) + penalty
                     redis_client.sadd(visited_key, hashed_url)
                     email_count += len(page_emails)
                 except Exception as e:
