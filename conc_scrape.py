@@ -1,3 +1,4 @@
+import math
 import sys
 import re
 import hashlib
@@ -67,13 +68,12 @@ def scrape_emails(args, redis_client):
                 time.sleep(30)
                 continue
 
-            futures = {executor.submit(scrape_page, url.split(',', 1)[1]): url for url, _ in to_visit}
+            futures = {executor.submit(scrape_page, url): url for url, _ in to_visit}
             zadd_mapping = {}
+            email_count = 0
 
             for future in as_completed(futures):
                 url = futures[future]
-                depth, url = url.split(',', 1)
-                depth = int(depth)
                 hashed_url = hash_url(url)
 
                 try:
@@ -84,19 +84,19 @@ def scrape_emails(args, redis_client):
 
                     if len(page_emails) > 0:
                         redis_client.sadd(emails_key, *page_emails)
-                    if len(unvisited_links) > 0 and depth < args.depth:
+                    if len(unvisited_links) > 0:
                         for link in unvisited_links:
                             domain = get_domain(link)
                             domain_count = redis_client.hincrby(domain_count_key, domain, 1)
-                            zadd_mapping[f"{depth + 1},{link}"] = int(domain_count)
+                            zadd_mapping[link] = math.sqrt(int(domain_count))
                     redis_client.sadd(visited_key, hashed_url)
-
-                    print(f"Depth {depth} added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
+                    email_count += len(page_emails)
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
 
             if zadd_mapping:
                 redis_client.zadd(to_visit_key, zadd_mapping)
+            print(f"Added {email_count} email(s) and {len(zadd_mapping)} URL(s)")
 
 def main(args):
     redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
@@ -104,8 +104,8 @@ def main(args):
     if args.url:
         if is_valid_url(args.url):
             domain = get_domain(args.url)
-            redis_client.zadd(to_visit_key, {f"0,{args.url}": 0})
-            redis_client.hincrby(domain_count_key, domain, 1)
+            domain_count = redis_client.hincrby(domain_count_key, domain, 1)
+            redis_client.zadd(to_visit_key, {args.url: math.sqrt(int(domain_count))})
         else:
             print("Invalid URL. Please provide a valid URL.")
             sys.exit(1)
@@ -147,13 +147,6 @@ if __name__ == "__main__":
         type=str,
         default="",
         help="Only scrape URLs whose hostname ends with the specified domain."
-    )
-
-    parser.add_argument(
-        "--depth",
-        type=int,
-        default=10,
-        help="Maximum depth to search (default: 10)."
     )
 
     parser.add_argument(
