@@ -59,8 +59,10 @@ def get_domain(url):
     return parsed.hostname
 
 def scrape_emails(args, redis_client):
+    end_time = time.time() + 3600  # Run for one hour
+
     with ThreadPoolExecutor(args.threads) as executor:
-        while True:
+        while time.time() < end_time:
             to_visit = redis_client.zpopmin(to_visit_key, args.threads)
 
             if not to_visit:
@@ -119,10 +121,16 @@ def main(args):
         p.start()
         processes.append(p)
 
-    for p in processes:
-        p.join()
+    while True:
+        for p in processes[:]:
+            p.join(timeout=0)
+            if not p.is_alive():
+                processes.remove(p)
+                new_p = Process(target=scrape_emails, args=(args, redis_client))
+                new_p.start()
+                processes.append(new_p)
 
-    print(f"Email scraping completed for: {args.url}")
+        time.sleep(1)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
