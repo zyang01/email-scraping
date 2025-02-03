@@ -16,6 +16,7 @@ visited_key = "visited_urls"
 emails_key = "scraped_emails"
 to_visit_key = "to_visit_urls"
 domain_count_key = "domain_count"
+shutdown_key = "shutdown"
 
 def get_emails_from_text(text):
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -63,6 +64,10 @@ def scrape_emails(args, redis_client):
 
     with ThreadPoolExecutor(args.threads) as executor:
         while time.time() < end_time:
+            if redis_client.get(shutdown_key) == "yes":
+                print("Shutdown signal received. Exiting...")
+                break
+
             to_visit = redis_client.zpopmin(to_visit_key, args.threads)
 
             if not to_visit:
@@ -121,16 +126,19 @@ def main(args):
         p.start()
         processes.append(p)
 
-    while True:
+    while processes:
         for p in processes[:]:
             p.join(timeout=0)
             if not p.is_alive():
                 processes.remove(p)
-                new_p = Process(target=scrape_emails, args=(args, redis_client))
-                new_p.start()
-                processes.append(new_p)
+                if redis_client.get(shutdown_key) != "yes":
+                    new_p = Process(target=scrape_emails, args=(args, redis_client))
+                    new_p.start()
+                    processes.append(new_p)
 
         time.sleep(1)
+
+    print("All child processes have terminated. Exiting main process.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
