@@ -17,32 +17,29 @@ emails_key = "scraped_emails"
 to_visit_key = "to_visit_urls_set"
 domain_count_key = "domain_count"
 hostname_to_name_key = "hostname_to_name"
+failed_key = "failed_urls"
 
 def get_emails_from_text(text):
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
     return re.findall(email_pattern, text)
 
 def scrape_page(url):
-    try:
-        response = requests.get(
-            url,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.47 Safari/537.36'
-            },
-            timeout=3
-        )
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
+    response = requests.get(
+        url,
+        headers={
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.47 Safari/537.36'
+        },
+        timeout=3
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
 
-        emails = get_emails_from_text(soup.get_text())
+    emails = get_emails_from_text(soup.get_text())
 
-        links = [urljoin(url, a.get('href')) for a in soup.find_all('a', href=True)]
-        links = [link for link in links if is_valid_url(link)]
+    links = [urljoin(url, a.get('href')) for a in soup.find_all('a', href=True)]
+    links = [link for link in links if is_valid_url(link)]
 
-        return emails, links
-    except requests.RequestException as e:
-        print(f"Error scraping {url}: {e}")
-        return [], []
+    return emails, links
 
 def is_valid_url(url):
     parsed = urlparse(url)
@@ -111,6 +108,7 @@ def scrape_emails(args):
                     print(f"Added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
+                    redis_client.sadd(failed_key, f"{hostname}:{url}")
 
 def main(args):
     if args.json_file:
