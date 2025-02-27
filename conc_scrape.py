@@ -7,6 +7,7 @@ import requests
 import argparse
 import redis
 import json
+import os
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Pool
@@ -78,8 +79,25 @@ def process_json_file(json_file, redis_client):
                         redis_client.zadd(to_visit_key, {val: count})
                         print(f"Added {val} to the list of URLs to visit with score {count}")
 
+def process_txt_file(txt_file, redis_client):
+    with open(txt_file, 'r') as file:
+        for line in file:
+            url = line.strip()
+            if is_valid_url(url):
+                hostname = get_domain(url)
+                redis_client.hset(hostname_to_name_key, hostname, hostname)
+                if not redis_client.sismember(visited_key, hash_url(url)):
+                    count = redis_client.hincrby(hostname_count_key, hostname, 1)
+                    val = f"{hostname}:{url}"
+                    redis_client.zadd(to_visit_key, {val: count})
+                    print(f"Added {val} to the list of URLs to visit with score {count}")
+
+def get_redis_client():
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+    return redis.StrictRedis.from_url(redis_url, decode_responses=True)
+
 def scrape_emails(args):
-    redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
+    redis_client = get_redis_client()
     with ThreadPoolExecutor(args.threads) as executor:
         while True:
             to_visit = redis_client.zpopmin(to_visit_key, args.threads)
@@ -123,9 +141,15 @@ def scrape_emails(args):
                     redis_client.zadd(failed_key, {f"{hostname}:{url}": score})
 
 def main(args):
+    redis_client = get_redis_client()
+    
     if args.json_file:
-        redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
         process_json_file(args.json_file, redis_client)
+    
+    if args.txt_file:
+        process_txt_file(args.txt_file, redis_client)
+        print("Processed txt file and added URLs to visit. Exiting.")
+        return
 
     print(f"Starting email scraping")
 
@@ -159,6 +183,12 @@ if __name__ == "__main__":
         "--json_file",
         type=str,
         help="Path to a JSON file containing names and links."
+    )
+
+    parser.add_argument(
+        "--txt_file",
+        type=str,
+        help="Path to a txt file containing URLs."
     )
 
     args = parser.parse_args()
