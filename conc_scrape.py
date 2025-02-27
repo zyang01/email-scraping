@@ -18,6 +18,9 @@ to_visit_key = "to_visit_urls_set"
 domain_count_key = "domain_count"
 hostname_to_name_key = "hostname_to_name"
 failed_key = "failed_urls"
+hostname_count_key = "hostname_count"
+processing_key = "processing_urls"
+processed_key = "processed_urls"
 
 def get_emails_from_text(text):
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -70,25 +73,29 @@ def process_json_file(json_file, redis_client):
                     hostname = get_domain(link)
                     redis_client.hset(hostname_to_name_key, hostname, name)
                     if not redis_client.sismember(visited_key, hash_url(link)):
+                        count = redis_client.hincrby(hostname_count_key, hostname, 1)
                         val = f"{hostname}:{link}"
-                        redis_client.sadd(to_visit_key, val)
-                        print(f"Added {val} to the list of URLs to visit")
+                        redis_client.zadd(to_visit_key, {val: count})
+                        print(f"Added {val} to the list of URLs to visit with score {count}")
 
 def scrape_emails(args):
     redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
     with ThreadPoolExecutor(args.threads) as executor:
         while True:
-            to_visit = redis_client.spop(to_visit_key, args.threads)
+            to_visit = redis_client.zpopmin(to_visit_key, args.threads)
 
             if not to_visit:
                 print("No more URLs to visit. Checking again in 30s.")
                 time.sleep(30)
                 continue
 
-            futures = {executor.submit(scrape_page, url.split(':', 1)[1]): url for url in to_visit}
+            for url, score in to_visit:
+                redis_client.zadd(processing_key, {url: score})
+
+            futures = {executor.submit(scrape_page, url.split(':', 1)[1]): (url, score) for url, score in to_visit}
 
             for future in as_completed(futures):
-                url = futures[future]
+                url, score = futures[future]
                 hostname, url = url.split(':', 1)
                 hashed_url = hash_url(url)
 
@@ -102,13 +109,18 @@ def scrape_emails(args):
                         formatted_emails = [f"{hostname}:{email}" for email in page_emails]
                         redis_client.sadd(emails_key, *formatted_emails)
                     if len(unvisited_links) > 0:
-                        redis_client.sadd(to_visit_key, *[f"{hostname}:{link}" for link in unvisited_links])
+                        for link in unvisited_links:
+                            count = redis_client.hincrby(hostname_count_key, hostname, 1)
+                            redis_client.zadd(to_visit_key, {f"{hostname}:{link}": count})
                     redis_client.sadd(visited_key, hashed_url)
+                    redis_client.zrem(processing_key, f"{hostname}:{url}")
+                    redis_client.zadd(processed_key, {f"{hostname}:{url}": score})
 
                     print(f"Added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
-                    redis_client.sadd(failed_key, f"{hostname}:{url}")
+                    redis_client.zrem(processing_key, f"{hostname}:{url}")
+                    redis_client.zadd(failed_key, {f"{hostname}:{url}": score})
 
 def main(args):
     if args.json_file:
