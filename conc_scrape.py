@@ -1,4 +1,3 @@
-import math
 import sys
 import re
 import hashlib
@@ -7,19 +6,17 @@ import redis.client
 import requests
 import argparse
 import redis
+import json
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import Pool
 from urllib.parse import urljoin, urlparse
-from multiprocessing import Process
-import os
-import socket
 
 visited_key = "visited_urls"
 emails_key = "scraped_emails"
-to_visit_key = "to_visit_urls"
+to_visit_key = "to_visit_urls_set"
 domain_count_key = "domain_count"
-shutdown_key = "shutdown"
-register_key = "register"
+hostname_to_name_key = "hostname_to_name"
 
 def get_emails_from_text(text):
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -60,112 +57,78 @@ def is_valid_domain(url, domain):
 
 def get_domain(url):
     parsed = urlparse(url)
-    return parsed.hostname
+    hostname = parsed.hostname
+    if (hostname.startswith('www.')):
+        hostname = hostname[4:]
+    return hostname
 
-def scrape_emails(args, redis_client, hostname):
-    end_time = time.time() + 3600  # Run for one hour
+def process_json_file(json_file, redis_client):
+    with open(json_file, 'r') as file:
+        data = json.load(file)
+        for entry in data:
+            name = entry['name']
+            links = entry['links']
+            for link in links:
+                if is_valid_url(link):
+                    hostname = get_domain(link)
+                    redis_client.hset(hostname_to_name_key, hostname, name)
+                    if not redis_client.sismember(visited_key, hash_url(link)):
+                        val = f"{hostname}:{link}"
+                        redis_client.sadd(to_visit_key, val)
+                        print(f"Added {val} to the list of URLs to visit")
 
+def scrape_emails(args):
+    redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
     with ThreadPoolExecutor(args.threads) as executor:
-        while time.time() < end_time:
-            if redis_client.get(shutdown_key) == "yes" or \
-                redis_client.hget(register_key, hostname) == "shutdown":
-                print("Shutdown signal received. Exiting child process...")
-                break
-
-            to_visit = redis_client.zpopmin(to_visit_key, args.threads)
+        while True:
+            to_visit = redis_client.spop(to_visit_key, args.threads)
 
             if not to_visit:
-                print("No more URLs to visit. Checking again in 10s.")
-                time.sleep(10)
+                print("No more URLs to visit. Checking again in 30s.")
+                time.sleep(30)
                 continue
 
-            futures = {executor.submit(scrape_page, url): (url, score) for url, score in to_visit}
-            zadd_mapping = {}
-            email_count = 0
+            futures = {executor.submit(scrape_page, url.split(':', 1)[1]): url for url in to_visit}
 
             for future in as_completed(futures):
-                url, score = futures[future]
+                url = futures[future]
+                hostname, url = url.split(':', 1)
                 hashed_url = hash_url(url)
-                penalty = math.sqrt(score)
 
                 try:
                     page_emails, links = future.result()
-                    links = [link for link in links if is_valid_domain(link, args.domain)]
+                    links = [link for link in links if get_domain(link).endswith(hostname)]
                     ismembers = redis_client.smismember(visited_key, map(hash_url, links)) if len(links) > 0 else []
                     unvisited_links = [link for link, ismember in zip(links, ismembers) if not ismember]
 
                     if len(page_emails) > 0:
-                        redis_client.sadd(emails_key, *page_emails)
+                        formatted_emails = [f"{hostname}:{email}" for email in page_emails]
+                        redis_client.sadd(emails_key, *formatted_emails)
                     if len(unvisited_links) > 0:
-                        for link in unvisited_links:
-                            domain = get_domain(link)
-                            domain_count = redis_client.hincrby(domain_count_key, domain, 1)
-                            zadd_mapping[link] = math.sqrt(int(domain_count)) + penalty
+                        redis_client.sadd(to_visit_key, *[f"{hostname}:{link}" for link in unvisited_links])
                     redis_client.sadd(visited_key, hashed_url)
-                    email_count += len(page_emails)
+
+                    print(f"Added {len(page_emails)} email(s) and {len(unvisited_links)}/{len(links)} URL(s) processing {url}")
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
 
-            if zadd_mapping:
-                redis_client.zadd(to_visit_key, zadd_mapping, nx=True)
-            print(f"Added {email_count} email(s) and {len(zadd_mapping)} URL(s)")
-
 def main(args):
-    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
-    redis_client = redis.StrictRedis.from_url(redis_url, decode_responses=True)
-    hostname = socket.gethostname()
-    redis_client.hset(register_key, hostname, "online")
+    if args.json_file:
+        redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
+        process_json_file(args.json_file, redis_client)
 
-    if args.url:
-        if is_valid_url(args.url):
-            domain = get_domain(args.url)
-            domain_count = redis_client.hincrby(domain_count_key, domain, 1)
-            redis_client.zadd(to_visit_key, {args.url: math.sqrt(int(domain_count))})
-        else:
-            print("Invalid URL. Please provide a valid URL.")
-            sys.exit(1)
+    print(f"Starting email scraping")
 
-    print(f"Starting email scraping from: {args.url}")
+    with Pool(args.processes) as pool:
+        pool.map(scrape_emails, [args] * args.processes)
+        pool.close()
+        pool.join()
 
-    processes = []
-    for _ in range(args.processes):
-        p = Process(target=scrape_emails, args=(args, redis_client, hostname))
-        p.start()
-        processes.append(p)
-
-    while processes:
-        if redis_client.get(shutdown_key) == "yes" or \
-            redis_client.hget(register_key, hostname) == "shutdown":
-            print("Shutdown signal received. Exiting main loop...")
-            break
-
-        for p in processes[:]:
-            p.join(timeout=0)
-            if not p.is_alive():
-                processes.remove(p)
-                if redis_client.get(shutdown_key) != "yes":
-                    new_p = Process(target=scrape_emails, args=(args, redis_client, hostname))
-                    new_p.start()
-                    processes.append(new_p)
-
-        time.sleep(1)
-
-    for p in processes:
-        p.join()
-
-    redis_client.hset(register_key, hostname, "offline")
-    print("All child processes have terminated. Exiting main process.")
+    print(f"Email scraping completed")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Scrape email addresses with a starting url"
-    )
-
-    parser.add_argument(
-        "--url",
-        type=str,
-        default="",
-        help="Starting URL (default: None)"
+        description="Scrape email addresses"
     )
 
     parser.add_argument(
@@ -176,17 +139,16 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--domain",
-        type=str,
-        default="",
-        help="Only scrape URLs whose hostname ends with the specified domain."
+        "--processes",
+        type=int,
+        default=4,
+        help="Number of concurrent processes (default: 4)."
     )
 
     parser.add_argument(
-        "--processes",
-        type=int,
-        default=1,
-        help="Number of concurrent processes (default: 1)."
+        "--json_file",
+        type=str,
+        help="Path to a JSON file containing names and links."
     )
 
     args = parser.parse_args()
