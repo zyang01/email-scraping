@@ -76,8 +76,9 @@ def process_json_file(json_file, redis_client):
                     if not redis_client.sismember(visited_key, hash_url(link)):
                         count = redis_client.hincrby(hostname_count_key, hostname, 1)
                         val = f"{hostname}:{link}"
-                        redis_client.zadd(to_visit_key, {val: count})
-                        print(f"Added {val} to the list of URLs to visit with score {count}")
+                        if not redis_client.zscore(to_visit_key, val):
+                            redis_client.zadd(to_visit_key, {val: count})
+                            print(f"Added {val} to the list of URLs to visit with score {count}")
 
 def process_txt_file(txt_file, redis_client):
     with open(txt_file, 'r') as file:
@@ -89,8 +90,9 @@ def process_txt_file(txt_file, redis_client):
                 if not redis_client.sismember(visited_key, hash_url(url)):
                     count = redis_client.hincrby(hostname_count_key, hostname, 1)
                     val = f"{hostname}:{url}"
-                    redis_client.zadd(to_visit_key, {val: count})
-                    print(f"Added {val} to the list of URLs to visit with score {count}")
+                    if not redis_client.zscore(to_visit_key, val):
+                        redis_client.zadd(to_visit_key, {val: count})
+                        print(f"Added {val} to the list of URLs to visit with score {count}")
 
 def get_redis_client():
     redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
@@ -129,7 +131,9 @@ def scrape_emails(args):
                     if len(unvisited_links) > 0:
                         for link in unvisited_links:
                             count = redis_client.hincrby(hostname_count_key, hostname, 1)
-                            redis_client.zadd(to_visit_key, {f"{hostname}:{link}": count})
+                            val = f"{hostname}:{link}"
+                            if not redis_client.zscore(to_visit_key, val):
+                                redis_client.zadd(to_visit_key, {val: count})
                     redis_client.sadd(visited_key, hashed_url)
                     redis_client.zrem(processing_key, f"{hostname}:{url}")
                     redis_client.zadd(processed_key, {f"{hostname}:{url}": score})
