@@ -3,6 +3,7 @@ import random
 import time
 import json
 import logging
+import redis
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -16,20 +17,32 @@ def log_message(message):
 
 # Load SMTP credentials from a JSON file
 SMTP_CREDENTIALS_FILE = "smtp_credentials.json"
-EMAIL_ADDRESSES_FILE = "email_addresses.txt"
 EMAIL_TEMPLATE_FILE = "legislature_email.html"
 
 # Load SMTP credentials
 with open(SMTP_CREDENTIALS_FILE, "r") as f:
     smtp_accounts = json.load(f)
 
-# Load recipient email addresses
-with open(EMAIL_ADDRESSES_FILE, "r") as f:
-    email_addresses = [line.strip() for line in f.readlines() if line.strip()]
-
 # Load email template
 with open(EMAIL_TEMPLATE_FILE, "r") as f:
     email_template = f.read()
+
+# Initialize Redis connection
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+
+def get_random_email():
+    available_emails = redis_client.sdiff('media:emails', 'media:sent', 'media:failed')
+    if available_emails:
+        return random.choice(list(available_emails)).decode('utf-8')
+    else:
+        log_message("No more emails to send.")
+        return None
+
+def mark_email_as_sent(email):
+    redis_client.sadd('media:sent', email)
+
+def mark_email_as_failed(email):
+    redis_client.sadd('media:failed', email)
 
 def send_email(smtp_info, recipient):
     try:
@@ -44,11 +57,17 @@ def send_email(smtp_info, recipient):
             server.login(smtp_info['email'], smtp_info['password'])
             server.sendmail(smtp_info['email'], recipient, msg.as_string())
             log_message(f"Email sent to {recipient} using {smtp_info['email']}")
+            mark_email_as_sent(recipient)
     except Exception as e:
         log_message(f"Failed to send email to {recipient} using {smtp_info['email']}: {e}")
+        mark_email_as_failed(recipient)
 
-# Iterate over email addresses and send emails with rotating SMTP accounts
-for i, recipient in enumerate(email_addresses):
+# Send emails with rotating SMTP accounts
+i = 0
+while True:
+    recipient = get_random_email()
+    if recipient is None:
+        break
     smtp_info = smtp_accounts[i % len(smtp_accounts)]
     send_email(smtp_info, recipient)
     
@@ -56,5 +75,6 @@ for i, recipient in enumerate(email_addresses):
     delay = random.randint(1, 30)
     log_message(f"Waiting {delay} seconds before sending the next email...")
     time.sleep(delay)
+    i += 1
 
 log_message("Email sending completed.")
