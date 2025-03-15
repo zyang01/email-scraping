@@ -61,6 +61,8 @@ def send_email(smtp_info, recipient):
     except Exception as e:
         log_message(f"Failed to send email to {recipient} using {smtp_info['email']}: {e}")
         mark_email_as_failed(recipient)
+        log_message("Waiting 60 seconds before trying the next SMTP account...")
+        time.sleep(60)
 
 # Send emails with rotating SMTP accounts
 i = 0
