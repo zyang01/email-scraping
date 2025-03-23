@@ -44,7 +44,7 @@ def mark_email_as_sent(email):
 def mark_email_as_failed(email):
     redis_client.sadd('media:failed', email)
 
-def send_email(smtp_info, recipient):
+def send_email(smtp_info, recipient, retry_delay=60):
     try:
         msg = MIMEMultipart()
         msg['From'] = smtp_info['email']
@@ -58,20 +58,26 @@ def send_email(smtp_info, recipient):
             server.sendmail(smtp_info['email'], recipient, msg.as_string())
             log_message(f"Email sent to {recipient} using {smtp_info['email']}")
             mark_email_as_sent(recipient)
+            return True  # Email sent successfully
     except Exception as e:
         log_message(f"Failed to send email to {recipient} using {smtp_info['email']}: {e}")
         mark_email_as_failed(recipient)
-        log_message("Waiting 60 seconds before trying the next SMTP account...")
-        time.sleep(60)
+        log_message(f"Waiting {retry_delay} seconds before trying the next SMTP account...")
+        time.sleep(retry_delay)
+        return False  # Email sending failed
 
 # Send emails with rotating SMTP accounts
 i = 0
+retry_delay = 60  # Initial retry delay
 while True:
     recipient = get_random_email()
     if recipient is None:
         break
     smtp_info = smtp_accounts[i % len(smtp_accounts)]
-    send_email(smtp_info, recipient)
+    if send_email(smtp_info, recipient, retry_delay):
+        retry_delay = 60  # Reset retry delay on success
+    else:
+        retry_delay *= 2  # Exponential backoff on failure
     
     # Random delay between emails (1 to 30 seconds)
     delay = random.randint(1, 30)
