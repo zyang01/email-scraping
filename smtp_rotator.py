@@ -85,4 +85,12 @@ while True:
     time.sleep(delay)
     i += 1
 
+    # Reload SMTP credentials
+    with open(SMTP_CREDENTIALS_FILE, "r") as f:
+        smtp_accounts = json.load(f)
+    
+    # Reload email template
+    with open(EMAIL_TEMPLATE_FILE, "r") as f:
+        email_template = f.read()
+
 log_message("Email sending completed.")
